@@ -19,105 +19,118 @@ Date.prototype.getWeek = function () {
 };
 
 mongoose.set('strictQuery', true);
-mongoose.connect(process.env.MONGO_URI).then(() => {
-    new (class Main {
-        groups: (BaseOGroup | BaseZGroup)[] = [];
-        bot = new TelegramBot(process.env.TOKEN, { polling: false });
+mongoose
+    .connect(process.env.MONGO_URI)
+    .then(async () => {
+        return await new (class Main {
+            groups: (BaseOGroup | BaseZGroup)[] = [];
+            bot = new TelegramBot(process.env.TOKEN, { polling: false });
 
-        constructor() {}
+            constructor() {}
 
-        getGroup(name: string, instId: number): BaseZGroup | BaseOGroup {
-            let group = this.groups.find((u) => u.name == name);
+            getGroup(name: string, instId: number): BaseZGroup | BaseOGroup {
+                let group = this.groups.find((u) => u.name == name);
 
-            if (group) return group;
-            else {
-                let newGroup = BaseGroup.isZFOGroup(name) ? new BaseZGroup(name, instId) : new BaseOGroup(name, instId);
+                if (group) return group;
+                else {
+                    let newGroup = BaseGroup.isZFOGroup(name) ? new BaseZGroup(name, instId) : new BaseOGroup(name, instId);
 
-                this.groups.push(newGroup);
+                    this.groups.push(newGroup);
 
-                return newGroup;
-            }
-        }
-
-        getLastFinishedLessonIndex(date: Date = new Date()): number | null {
-            const now = date.getTime();
-
-            for (let i = BaseGroup.lessonsTime.length - 1; i >= 1; i--) {
-                const [endH, endM] = BaseGroup.lessonsTime[i][1].split(':').map(Number);
-
-                const endDate = new Date(date);
-                endDate.setHours(endH, endM, 0, 0);
-
-                if (now >= endDate.getTime()) return i;
+                    return newGroup;
+                }
             }
 
-            return null; // ничего не завершилось (например, до начала учебного дня)
-        }
+            getLastFinishedLessonIndex(date: Date = new Date()): number | null {
+                const now = date.getTime();
 
-        upgradeGroup(base: BaseOGroup): OGroup;
-        upgradeGroup(base: BaseZGroup): ZGroup;
-        upgradeGroup(base: BaseZGroup | BaseOGroup): ZGroup | OGroup;
+                for (let i = BaseGroup.lessonsTime.length - 1; i >= 1; i--) {
+                    const [endH, endM] = BaseGroup.lessonsTime[i][1].split(':').map(Number);
 
-        upgradeGroup(base: BaseOGroup | BaseZGroup): OGroup | ZGroup {
-            let group: OGroup | ZGroup;
+                    const endDate = new Date(date);
+                    endDate.setHours(endH, endM, 0, 0);
 
-            if (base instanceof BaseOGroup) group = new OGroup(base.name, base.instId);
-            else if (base instanceof BaseZGroup) group = new ZGroup(base.name, base.instId);
-            else throw new Error('Неизвестный тип группы');
+                    if (now >= endDate.getTime()) return i;
+                }
 
-            group.cachedFullRawSchedule = base.cachedFullRawSchedule;
+                return null; // ничего не завершилось (например, до начала учебного дня)
+            }
 
-            return group;
-        }
+            upgradeGroup(base: BaseOGroup): OGroup;
+            upgradeGroup(base: BaseZGroup): ZGroup;
+            upgradeGroup(base: BaseZGroup | BaseOGroup): ZGroup | OGroup;
 
-        async exec() {
-            let users = await Users.find({ notifications: true }).exec();
+            upgradeGroup(base: BaseOGroup | BaseZGroup): OGroup | ZGroup {
+                let group: OGroup | ZGroup;
 
-            let dateToday = new Date();
-            let dateTomorrow = new Date(Date.now() + 1000 * 60 * 60 * 24);
+                if (base instanceof BaseOGroup) group = new OGroup(base.name, base.instId);
+                else if (base instanceof BaseZGroup) group = new ZGroup(base.name, base.instId);
+                else throw new Error('Неизвестный тип группы');
 
-            let lastFinishedLessonIndex = this.getLastFinishedLessonIndex();
+                group.cachedFullRawSchedule = base.cachedFullRawSchedule;
 
-            console.log('[notify] Начинаю отправлять уведомления ');
+                return group;
+            }
 
-            users.forEach(async (user) => {
-                if (!user.group || !user.inst_id) return;
+            async exec() {
+                let users = await Users.find({ notifications: true }).exec();
 
-                let group = this.getGroup(user.group, user.inst_id);
-                let todaySchedule = await group.getDayRawSchedule(dateToday);
+                let dateToday = new Date();
+                let dateTomorrow = new Date(Date.now() + 1000 * 60 * 60 * 24);
 
-                if (!todaySchedule) return;
+                // DEBUG
+                let testDate = new Date('Mon Apr 14 2025 11:20:55 GMT+0300 (Москва, стандартное время)');
 
-                let lastTodayLessonIndex = !todaySchedule.length ? 1 : todaySchedule[todaySchedule.length - 1].pair;
+                let lastFinishedLessonIndex = this.getLastFinishedLessonIndex(testDate);
 
-                if (lastTodayLessonIndex !== lastFinishedLessonIndex) return;
+                console.log('[notify] Начинаю отправлять уведомления ');
 
-                console.log(`[notify] ${user.id}, ${user.group}`);
+                return await Promise.all(
+                    users.map(async (user) => {
+                        if (!user.group || !user.inst_id) return;
 
-                let upgradedGroup = this.upgradeGroup(group);
+                        let group = this.getGroup(user.group, user.inst_id);
+                        let todaySchedule = await group.getDayRawSchedule(dateToday);
+                        let tomorrowSchedule = await group.getDayRawSchedule(dateTomorrow);
 
-                let text = await upgradedGroup.getTextSchedule(dateTomorrow);
-                let events = await upgradedGroup.getTextEvents(dateTomorrow);
-                if (events) text += `\n\n${events}`;
+                        if (!todaySchedule || !tomorrowSchedule || tomorrowSchedule.length == 0) return;
 
-                await this.bot.sendMessage(user.id, text, { parse_mode: 'HTML' }).catch((err) => {
-                    if (
-                        [
-                            // 50 оттенков "Не могу отправить сообщение"
-                            'Error: ETELEGRAM: 403 Forbidden: bot was blocked by the user',
-                            'Error: ETELEGRAM: 400 Bad Request: chat not found',
-                            'Error: ETELEGRAM: 403 Forbidden: user is deactivated',
-                        ].includes(`${err}`)
-                    ) {
-                        console.log(`[notify] Chat not found or was deleted, or bot was blocked by ${user.id}`);
-                        console.log(`[notify] ${err}`);
-                        // user.delete();
-                    } else {
-                        console.log(`[notify] "${err}"`);
-                        console.log(err);
-                    }
-                });
-            });
-        }
-    })();
-}, console.log);
+                        let lastTodayLessonIndex = !todaySchedule.length ? 1 : todaySchedule[todaySchedule.length - 1].pair;
+
+                        console.log(lastTodayLessonIndex, lastFinishedLessonIndex);
+
+                        if (lastTodayLessonIndex !== lastFinishedLessonIndex) return;
+
+                        console.log(`[notify] ${user.userId}, ${user.group}`);
+
+                        let upgradedGroup = this.upgradeGroup(group);
+
+                        let text = await upgradedGroup.getTextSchedule(dateTomorrow);
+                        let events = await upgradedGroup.getTextEvents(dateTomorrow);
+                        if (events) text += `\n\n${events}`;
+
+                        await this.bot.sendMessage(user.userId, text, { parse_mode: 'HTML' }).catch((err) => {
+                            if (
+                                [
+                                    // 50 оттенков "Не могу отправить сообщение"
+                                    'Error: ETELEGRAM: 403 Forbidden: bot was blocked by the user',
+                                    'Error: ETELEGRAM: 400 Bad Request: chat not found',
+                                    'Error: ETELEGRAM: 403 Forbidden: user is deactivated',
+                                ].includes(`${err}`)
+                            ) {
+                                console.log(`[notify] Chat not found or was deleted, or bot was blocked by ${user.id}`);
+                                console.log(`[notify] ${err}`);
+                                // user.delete();
+                            } else {
+                                console.log(`[notify] "${err}"`);
+                                console.log(err);
+                            }
+                        });
+                    }),
+                );
+            }
+        })().exec();
+    }, console.log)
+    .finally(async () => {
+        return await mongoose.disconnect();
+    });
